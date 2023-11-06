@@ -37,7 +37,9 @@
     "eslint": "^8.53.0",
     "eslint-config-prettier": "^8.10.0",
     "eslint-plugin-prettier": "^4.0.0",
+    "husky": "^8.0.3",
     "jest": "^28.1.0",
+    "lint-staged": "^15.0.2",
     "nodemon": "^2.0.7",
     "pkg": "^5.4.0",
     "prettier": "^2.8.8",
@@ -55,7 +57,8 @@
     "start-sw": "dotenv node build/src/index.js",
     "start": "npm run build && npm run start-sw",
     "test": "jest --watch",
-    "lint": "eslint src/**/*.ts"
+    "lint": "eslint src/**/*.ts",
+    "prepare": "husky install"
   },
   "pkg": {
     "scripts": [
@@ -84,5 +87,12 @@
     "preset": "ts-jest",
     "testEnvironment": "node",
     "globalSetup": "./src/test/setup.js"
+  },
+  "lint-staged": {
+    "*.js": "eslint --cache --fix",
+    "**/*.ts?(x)": [
+      "tsc -p tsconfig.json --noEmit",
+      "eslint --cache --fix"
+    ]
   }
 }
