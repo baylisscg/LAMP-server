@@ -14,7 +14,7 @@ import {
   ActivitySpecRepository,
   SensorSpecRepository,
   CredentialRepository,
-  TypeRepository,
+  TypeRepository
 } from "./couch"
 import {
   ResearcherRepository as ResearcherRepositoryMongo,
@@ -27,7 +27,7 @@ import {
   ActivitySpecRepository as ActivitySpecRepositoryMongo,
   SensorSpecRepository as SensorSpecRepositoryMongo,
   CredentialRepository as CredentialRepositoryMongo,
-  TypeRepository as TypeRepositoryMongo,
+  TypeRepository as TypeRepositoryMongo
 } from "./mongo"
 import {
   ResearcherInterface,
@@ -40,46 +40,57 @@ import {
   ActivitySpecInterface,
   SensorSpecInterface,
   CredentialInterface,
-  TypeInterface,
+  TypeInterface
 } from "./interface/RepositoryInterface"
 import ioredis from "ioredis"
 import { initializeQueues } from "../utils/queue/Queue"
+import { logger as rootLogger } from "../utils/logger"
+
 export let RedisClient: ioredis.Redis
 export let nc: Client
 export let MongoClientDB: any
 export const ApiResponseHeaders = {
   "Cache-Control": "no-store",
-  "Content-Security-Policy":"default-src 'self'",
-  "X-XSS-Protection":" 1; mode=block",
-  "X-Content-Type-Options":"nosniff",
-  "X-Frame-Options":"deny",
-  "Strict-Transport-Security":"max-age=31536000; includeSubdomains"
-}
-//initialize driver for db
-let DB_DRIVER = ""
-//Identifying the Database driver -- IF the DB in env starts with mongodb://, create mongodb connection
-//--ELSEIF the DB/CDB in env starts with http or https, create couch db connection
-if (process.env.DB?.startsWith("mongodb://")) {
-  DB_DRIVER = "mongodb"
-} else if (process.env.DB?.startsWith("http") || process.env.DB?.startsWith("https")) {
-  DB_DRIVER = "couchdb"
-  console.log(`COUCHDB adapter in use `)
-} else {
-  if (process.env.CDB?.startsWith("http") || process.env.CDB?.startsWith("https")) {
-    DB_DRIVER = "couchdb"
-    console.log(`COUCHDB adapter in use `)
-  } else {
-    console.log(`Missing repository adapter.`)
-  }
+  "Content-Security-Policy": "default-src 'self'",
+  "X-XSS-Protection": " 1; mode=block",
+  "X-Content-Type-Options": "nosniff",
+  "X-Frame-Options": "deny",
+  "Strict-Transport-Security": "max-age=31536000; includeSubdomains"
 }
 
+const logger = rootLogger.child({ component: "bootstrap" })
+
+function detectDBType(): string {
+  const tempLogger = rootLogger.child({component:"detectDbType"})
+  let DB_DRIVER
+  if (process.env.DB?.startsWith("mongodb://")) {
+    logger.debug("Found mongodb DB URL")
+    DB_DRIVER = "mongodb"
+  } else if (process.env.DB?.startsWith("http") || process.env.DB?.startsWith("https")) {
+    logger.debug("Found CouchDB URL")
+    DB_DRIVER = "couchdb"
+  } else {
+    if (process.env.CDB?.startsWith("http") || process.env.CDB?.startsWith("https")) {
+      logger.debug("Found CDB URL")
+      DB_DRIVER = "couchdb"
+    } else {
+      logger.error("Missing repository adapter")
+      throw new Error(`Missing repository adapter.`)
+    }
+  }
+  logger.info("%s adapter in use ",DB_DRIVER)
+  return DB_DRIVER
+}
+
+//initialize driver for db
+const DB_DRIVER = detectDBType()
 //IF the DB/CDB in env starts with http or https, create and export couch db connection
 export const Database: any =
   process.env.DB?.startsWith("http") || process.env.DB?.startsWith("https")
     ? nano(process.env.DB ?? "")
     : process.env.CDB?.startsWith("http") || process.env.CDB?.startsWith("https")
-    ? nano(process.env.CDB ?? "")
-    : ""
+      ? nano(process.env.CDB ?? "")
+      : ""
 
 export const uuid = customAlphabet("1234567890abcdefghjkmnpqrstvwxyz", 20)
 export const numeric_uuid = (): string => `U${Math.random().toFixed(10).slice(2, 12)}`
@@ -98,7 +109,9 @@ export const Encrypt = (data: string, mode: "Rijndael" | "AES256" = "Rijndael"):
       const cipher = crypto.createCipheriv("aes-256-cbc", Buffer.from(process.env.ROOT_KEY || "", "hex"), ivl)
       return Buffer.concat([ivl, cipher.update(Buffer.from(data, "utf16le")), cipher.final()]).toString("base64")
     }
-  } catch {}
+  } catch(err) {
+    logger.error(err,"Error while encrypting")
+  }
   return undefined
 }
 
@@ -119,7 +132,9 @@ export const Decrypt = (data: string, mode: "Rijndael" | "AES256" = "Rijndael"):
       )
       return Buffer.concat([cipher.update(dat.slice(16)), cipher.final()]).toString("utf16le")
     }
-  } catch {}
+  } catch(err){
+    logger.error(err,"Error while decrypting")
+  }
   return undefined
 }
 
@@ -127,41 +142,45 @@ export const Decrypt = (data: string, mode: "Rijndael" | "AES256" = "Rijndael"):
 export async function Bootstrap(): Promise<void> {
   if (typeof process.env.REDIS_HOST === "string") {
     try {
-      RedisClient = RedisFactory.getInstance()      
-      console.log("Trying to connect redis")
+      RedisClient = RedisFactory.getInstance()
+      logger.info("Trying to connect redis")
       RedisClient.on("connect", () => {
-        console.log("Connected to redis")
+        logger.info("Connected to redis")
         initializeQueues()
       })
       RedisClient.on("error", async (err: any) => {
-        console.log("redis connection error", err)
+        logger.error("redis connection error", err)
         RedisClient = RedisFactory.getInstance()
       })
       RedisClient.on("disconnected", async () => {
-        console.log("redis disconnected")
+        logger.info("redis disconnected")
         RedisClient = RedisFactory.getInstance()
-      })      
+      })
     } catch (err) {
-      console.log("Error initializing redis", err)
+      logger.error("Error initializing redis", err)
+      throw err // Rethrow the error
     }
-  }  
+  }
+
+  logger.debug("Connecting to NATS")
   await NatsConnect()
-  
+  logger.info("Connected to NATS")
+
   if (DB_DRIVER === "couchdb") {
-    console.group("Initializing database connection...")
+    logger.info("Initializing database connection...")
     const _db_list = await Database.db.list()
     if (!_db_list.includes("activity_spec")) {
-      console.log("Initializing ActivitySpec database...")
+      logger.info("Initializing ActivitySpec database...")
       await Database.db.create("activity_spec")
     }
-    console.log("ActivitySpec database online.")
+    logger.info("ActivitySpec database online.")
     if (!_db_list.includes("sensor_spec")) {
-      console.log("Initializing SensorSpec database...")
+      logger.info("Initializing SensorSpec database...")
       await Database.db.create("sensor_spec")
     }
-    console.log("SensorSpec database online.")
+    logger.info("SensorSpec database online.")
     if (!_db_list.includes("researcher")) {
-      console.log("Initializing Researcher database...")
+      logger.info("Initializing Researcher database...")
       await Database.db.create("researcher")
       Database.use("researcher").bulk({
         docs: [
@@ -172,18 +191,18 @@ export async function Bootstrap(): Promise<void> {
               timestamp: {
                 map: {
                   fields: {
-                    timestamp: "asc",
+                    timestamp: "asc"
                   },
-                  partial_filter_selector: {},
+                  partial_filter_selector: {}
                 },
                 reduce: "_count",
                 options: {
                   def: {
-                    fields: ["timestamp"],
-                  },
-                },
-              },
-            },
+                    fields: ["timestamp"]
+                  }
+                }
+              }
+            }
           },
           {
             _id: "_design/parent-timestamp-index",
@@ -193,18 +212,18 @@ export async function Bootstrap(): Promise<void> {
                 map: {
                   fields: {
                     "#parent": "asc",
-                    timestamp: "asc",
+                    timestamp: "asc"
                   },
-                  partial_filter_selector: {},
+                  partial_filter_selector: {}
                 },
                 reduce: "_count",
                 options: {
                   def: {
-                    fields: ["#parent", "timestamp"],
-                  },
-                },
-              },
-            },
+                    fields: ["#parent", "timestamp"]
+                  }
+                }
+              }
+            }
           },
           {
             _id: "_design/id-parent-timestamp-index",
@@ -215,25 +234,25 @@ export async function Bootstrap(): Promise<void> {
                   fields: {
                     _id: "asc",
                     "#parent": "asc",
-                    timestamp: "asc",
+                    timestamp: "asc"
                   },
-                  partial_filter_selector: {},
+                  partial_filter_selector: {}
                 },
                 reduce: "_count",
                 options: {
                   def: {
-                    fields: ["_id", "#parent", "timestamp"],
-                  },
-                },
-              },
-            },
-          },
-        ],
+                    fields: ["_id", "#parent", "timestamp"]
+                  }
+                }
+              }
+            }
+          }
+        ]
       })
     }
-    console.log("Researcher database online.")
+    logger.info("Researcher database online.")
     if (!_db_list.includes("study")) {
-      console.log("Initializing Study database...")
+      logger.info("Initializing Study database...")
       await Database.db.create("study")
       Database.use("study").bulk({
         docs: [
@@ -244,18 +263,18 @@ export async function Bootstrap(): Promise<void> {
               timestamp: {
                 map: {
                   fields: {
-                    timestamp: "asc",
+                    timestamp: "asc"
                   },
-                  partial_filter_selector: {},
+                  partial_filter_selector: {}
                 },
                 reduce: "_count",
                 options: {
                   def: {
-                    fields: ["timestamp"],
-                  },
-                },
-              },
-            },
+                    fields: ["timestamp"]
+                  }
+                }
+              }
+            }
           },
           {
             _id: "_design/parent-timestamp-index",
@@ -265,18 +284,18 @@ export async function Bootstrap(): Promise<void> {
                 map: {
                   fields: {
                     "#parent": "asc",
-                    timestamp: "asc",
+                    timestamp: "asc"
                   },
-                  partial_filter_selector: {},
+                  partial_filter_selector: {}
                 },
                 reduce: "_count",
                 options: {
                   def: {
-                    fields: ["#parent", "timestamp"],
-                  },
-                },
-              },
-            },
+                    fields: ["#parent", "timestamp"]
+                  }
+                }
+              }
+            }
           },
           {
             _id: "_design/id-parent-timestamp-index",
@@ -287,25 +306,25 @@ export async function Bootstrap(): Promise<void> {
                   fields: {
                     _id: "asc",
                     "#parent": "asc",
-                    timestamp: "asc",
+                    timestamp: "asc"
                   },
-                  partial_filter_selector: {},
+                  partial_filter_selector: {}
                 },
                 reduce: "_count",
                 options: {
                   def: {
-                    fields: ["_id", "#parent", "timestamp"],
-                  },
-                },
-              },
-            },
-          },
-        ],
+                    fields: ["_id", "#parent", "timestamp"]
+                  }
+                }
+              }
+            }
+          }
+        ]
       })
     }
-    console.log("Study database online.")
+    logger.info("Study database online.")
     if (!_db_list.includes("participant")) {
-      console.log("Initializing Participant database...")
+      logger.info("Initializing Participant database...")
       await Database.db.create("participant")
       Database.use("participant").bulk({
         docs: [
@@ -316,18 +335,18 @@ export async function Bootstrap(): Promise<void> {
               timestamp: {
                 map: {
                   fields: {
-                    timestamp: "asc",
+                    timestamp: "asc"
                   },
-                  partial_filter_selector: {},
+                  partial_filter_selector: {}
                 },
                 reduce: "_count",
                 options: {
                   def: {
-                    fields: ["timestamp"],
-                  },
-                },
-              },
-            },
+                    fields: ["timestamp"]
+                  }
+                }
+              }
+            }
           },
           {
             _id: "_design/parent-timestamp-index",
@@ -337,18 +356,18 @@ export async function Bootstrap(): Promise<void> {
                 map: {
                   fields: {
                     "#parent": "asc",
-                    timestamp: "asc",
+                    timestamp: "asc"
                   },
-                  partial_filter_selector: {},
+                  partial_filter_selector: {}
                 },
                 reduce: "_count",
                 options: {
                   def: {
-                    fields: ["#parent", "timestamp"],
-                  },
-                },
-              },
-            },
+                    fields: ["#parent", "timestamp"]
+                  }
+                }
+              }
+            }
           },
           {
             _id: "_design/id-parent-timestamp-index",
@@ -359,25 +378,25 @@ export async function Bootstrap(): Promise<void> {
                   fields: {
                     _id: "asc",
                     "#parent": "asc",
-                    timestamp: "asc",
+                    timestamp: "asc"
                   },
-                  partial_filter_selector: {},
+                  partial_filter_selector: {}
                 },
                 reduce: "_count",
                 options: {
                   def: {
-                    fields: ["_id", "#parent", "timestamp"],
-                  },
-                },
-              },
-            },
-          },
-        ],
+                    fields: ["_id", "#parent", "timestamp"]
+                  }
+                }
+              }
+            }
+          }
+        ]
       })
     }
-    console.log("Participant database online.")
+    logger.info("Participant database online.")
     if (!_db_list.includes("activity")) {
-      console.log("Initializing Activity database...")
+      logger.info("Initializing Activity database...")
       await Database.db.create("activity")
       Database.use("activity").bulk({
         docs: [
@@ -388,18 +407,18 @@ export async function Bootstrap(): Promise<void> {
               timestamp: {
                 map: {
                   fields: {
-                    timestamp: "asc",
+                    timestamp: "asc"
                   },
-                  partial_filter_selector: {},
+                  partial_filter_selector: {}
                 },
                 reduce: "_count",
                 options: {
                   def: {
-                    fields: ["timestamp"],
-                  },
-                },
-              },
-            },
+                    fields: ["timestamp"]
+                  }
+                }
+              }
+            }
           },
           {
             _id: "_design/parent-timestamp-index",
@@ -409,18 +428,18 @@ export async function Bootstrap(): Promise<void> {
                 map: {
                   fields: {
                     "#parent": "asc",
-                    timestamp: "asc",
+                    timestamp: "asc"
                   },
-                  partial_filter_selector: {},
+                  partial_filter_selector: {}
                 },
                 reduce: "_count",
                 options: {
                   def: {
-                    fields: ["#parent", "timestamp"],
-                  },
-                },
-              },
-            },
+                    fields: ["#parent", "timestamp"]
+                  }
+                }
+              }
+            }
           },
           {
             _id: "_design/id-parent-timestamp-index",
@@ -431,18 +450,18 @@ export async function Bootstrap(): Promise<void> {
                   fields: {
                     _id: "asc",
                     "#parent": "asc",
-                    timestamp: "asc",
+                    timestamp: "asc"
                   },
-                  partial_filter_selector: {},
+                  partial_filter_selector: {}
                 },
                 reduce: "_count",
                 options: {
                   def: {
-                    fields: ["_id", "#parent", "timestamp"],
-                  },
-                },
-              },
-            },
+                    fields: ["_id", "#parent", "timestamp"]
+                  }
+                }
+              }
+            }
           },
           {
             _id: "_design/id-timestamp-index",
@@ -452,25 +471,25 @@ export async function Bootstrap(): Promise<void> {
                 map: {
                   fields: {
                     _id: "asc",
-                    timestamp: "asc",
+                    timestamp: "asc"
                   },
-                  partial_filter_selector: {},
+                  partial_filter_selector: {}
                 },
                 reduce: "_count",
                 options: {
                   def: {
-                    fields: ["_id", "timestamp"],
-                  },
-                },
-              },
-            },
-          },
-        ],
+                    fields: ["_id", "timestamp"]
+                  }
+                }
+              }
+            }
+          }
+        ]
       })
     }
-    console.log("Activity database online.")
+    logger.info("Activity database online.")
     if (!_db_list.includes("sensor")) {
-      console.log("Initializing Sensor database...")
+      logger.info("Initializing Sensor database...")
       await Database.db.create("sensor")
       Database.use("sensor").bulk({
         docs: [
@@ -481,18 +500,18 @@ export async function Bootstrap(): Promise<void> {
               timestamp: {
                 map: {
                   fields: {
-                    timestamp: "asc",
+                    timestamp: "asc"
                   },
-                  partial_filter_selector: {},
+                  partial_filter_selector: {}
                 },
                 reduce: "_count",
                 options: {
                   def: {
-                    fields: ["timestamp"],
-                  },
-                },
-              },
-            },
+                    fields: ["timestamp"]
+                  }
+                }
+              }
+            }
           },
           {
             _id: "_design/parent-timestamp-index",
@@ -502,18 +521,18 @@ export async function Bootstrap(): Promise<void> {
                 map: {
                   fields: {
                     "#parent": "asc",
-                    timestamp: "asc",
+                    timestamp: "asc"
                   },
-                  partial_filter_selector: {},
+                  partial_filter_selector: {}
                 },
                 reduce: "_count",
                 options: {
                   def: {
-                    fields: ["#parent", "timestamp"],
-                  },
-                },
-              },
-            },
+                    fields: ["#parent", "timestamp"]
+                  }
+                }
+              }
+            }
           },
           {
             _id: "_design/id-parent-timestamp-index",
@@ -524,25 +543,25 @@ export async function Bootstrap(): Promise<void> {
                   fields: {
                     _id: "asc",
                     "#parent": "asc",
-                    timestamp: "asc",
+                    timestamp: "asc"
                   },
-                  partial_filter_selector: {},
+                  partial_filter_selector: {}
                 },
                 reduce: "_count",
                 options: {
                   def: {
-                    fields: ["_id", "#parent", "timestamp"],
-                  },
-                },
-              },
-            },
-          },
-        ],
+                    fields: ["_id", "#parent", "timestamp"]
+                  }
+                }
+              }
+            }
+          }
+        ]
       })
     }
-    console.log("Sensor database online.")
+    logger.info("Sensor database online.")
     if (!_db_list.includes("activity_event")) {
-      console.log("Initializing ActivityEvent database...")
+      logger.info("Initializing ActivityEvent database...")
       await Database.db.create("activity_event")
       Database.use("activity_event").bulk({
         docs: [
@@ -555,28 +574,28 @@ export async function Bootstrap(): Promise<void> {
                   fields: {
                     "#parent": "desc",
                     activity: "desc",
-                    timestamp: "desc",
+                    timestamp: "desc"
                   },
-                  partial_filter_selector: {},
+                  partial_filter_selector: {}
                 },
                 reduce: "_count",
                 options: {
                   def: {
                     fields: [
                       {
-                        "#parent": "desc",
+                        "#parent": "desc"
                       },
                       {
-                        activity: "desc",
+                        activity: "desc"
                       },
                       {
-                        timestamp: "desc",
-                      },
-                    ],
-                  },
-                },
-              },
-            },
+                        timestamp: "desc"
+                      }
+                    ]
+                  }
+                }
+              }
+            }
           },
           {
             _id: "_design/parent-timestamp-index",
@@ -586,32 +605,32 @@ export async function Bootstrap(): Promise<void> {
                 map: {
                   fields: {
                     "#parent": "desc",
-                    timestamp: "desc",
+                    timestamp: "desc"
                   },
-                  partial_filter_selector: {},
+                  partial_filter_selector: {}
                 },
                 reduce: "_count",
                 options: {
                   def: {
                     fields: [
                       {
-                        "#parent": "desc",
+                        "#parent": "desc"
                       },
                       {
-                        timestamp: "desc",
-                      },
-                    ],
-                  },
-                },
-              },
-            },
-          },
-        ],
+                        timestamp: "desc"
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        ]
       })
     }
-    console.log("ActivityEvent database online.")
+    logger.info("ActivityEvent database online.")
     if (!_db_list.includes("sensor_event")) {
-      console.log("Initializing SensorEvent database...")
+      logger.info("Initializing SensorEvent database...")
       await Database.db.create("sensor_event")
       Database.use("sensor_event").bulk({
         docs: [
@@ -624,28 +643,28 @@ export async function Bootstrap(): Promise<void> {
                   fields: {
                     "#parent": "desc",
                     sensor: "desc",
-                    timestamp: "desc",
+                    timestamp: "desc"
                   },
-                  partial_filter_selector: {},
+                  partial_filter_selector: {}
                 },
                 reduce: "_count",
                 options: {
                   def: {
                     fields: [
                       {
-                        "#parent": "desc",
+                        "#parent": "desc"
                       },
                       {
-                        sensor: "desc",
+                        sensor: "desc"
                       },
                       {
-                        timestamp: "desc",
-                      },
-                    ],
-                  },
-                },
-              },
-            },
+                        timestamp: "desc"
+                      }
+                    ]
+                  }
+                }
+              }
+            }
           },
           {
             _id: "_design/parent-timestamp-index",
@@ -655,32 +674,32 @@ export async function Bootstrap(): Promise<void> {
                 map: {
                   fields: {
                     "#parent": "desc",
-                    timestamp: "desc",
+                    timestamp: "desc"
                   },
-                  partial_filter_selector: {},
+                  partial_filter_selector: {}
                 },
                 reduce: "_count",
                 options: {
                   def: {
                     fields: [
                       {
-                        "#parent": "desc",
+                        "#parent": "desc"
                       },
                       {
-                        timestamp: "desc",
-                      },
-                    ],
-                  },
-                },
-              },
-            },
-          },
-        ],
+                        timestamp: "desc"
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        ]
       })
     }
-    console.log("SensorEvent database online.")
+    logger.info("SensorEvent database online.")
     if (!_db_list.includes("credential")) {
-      console.log("Initializing Credential database...")
+      logger.info("Initializing Credential database...")
       await Database.db.create("credential")
       Database.use("credential").bulk({
         docs: [
@@ -691,18 +710,18 @@ export async function Bootstrap(): Promise<void> {
               access_key: {
                 map: {
                   fields: {
-                    access_key: "asc",
+                    access_key: "asc"
                   },
-                  partial_filter_selector: {},
+                  partial_filter_selector: {}
                 },
                 reduce: "_count",
                 options: {
                   def: {
-                    fields: ["access_key"],
-                  },
-                },
-              },
-            },
+                    fields: ["access_key"]
+                  }
+                }
+              }
+            }
           },
           {
             _id: "_design/origin-index",
@@ -711,18 +730,18 @@ export async function Bootstrap(): Promise<void> {
               origin: {
                 map: {
                   fields: {
-                    origin: "asc",
+                    origin: "asc"
                   },
-                  partial_filter_selector: {},
+                  partial_filter_selector: {}
                 },
                 reduce: "_count",
                 options: {
                   def: {
-                    fields: ["origin"],
-                  },
-                },
-              },
-            },
+                    fields: ["origin"]
+                  }
+                }
+              }
+            }
           },
           {
             _id: "_design/origin-access_key-index",
@@ -732,20 +751,20 @@ export async function Bootstrap(): Promise<void> {
                 map: {
                   fields: {
                     origin: "asc",
-                    access_key: "asc",
+                    access_key: "asc"
                   },
-                  partial_filter_selector: {},
+                  partial_filter_selector: {}
                 },
                 reduce: "_count",
                 options: {
                   def: {
-                    fields: ["origin", "access_key"],
-                  },
-                },
-              },
-            },
-          },
-        ],
+                    fields: ["origin", "access_key"]
+                  }
+                }
+              }
+            }
+          }
+        ]
       })
       console.dir(`An initial administrator password was generated and saved for this installation.`)
       try {
@@ -756,15 +775,15 @@ export async function Bootstrap(): Promise<void> {
           origin: null,
           access_key: "admin",
           secret_key: Encrypt(p, "AES256"),
-          description: "System Administrator Credential",
+          description: "System Administrator Credential"
         } as any)
       } catch (e) {
         console.dir(e)
       }
     }
-    console.log("Credential database online.")
+    logger.info("Credential database online.")
     if (!_db_list.includes("tag")) {
-      console.log("Initializing Tag database...")
+      logger.info("Initializing Tag database...")
       await Database.db.create("tag")
       Database.use("tag").bulk({
         docs: [
@@ -777,30 +796,29 @@ export async function Bootstrap(): Promise<void> {
                   fields: {
                     "#parent": "asc",
                     type: "asc",
-                    key: "asc",
+                    key: "asc"
                   },
-                  partial_filter_selector: {},
+                  partial_filter_selector: {}
                 },
                 reduce: "_count",
                 options: {
                   def: {
-                    fields: ["#parent", "type", "key"],
-                  },
-                },
-              },
-            },
-          },
-        ],
+                    fields: ["#parent", "type", "key"]
+                  }
+                }
+              }
+            }
+          }
+        ]
       })
     }
-    console.log("Tag database online.")
-    console.groupEnd()
-    console.log("Database verification complete.")
+    logger.info("Tag database online.")
+    logger.info("Database verification complete.")
   } else {
     //Connect to mongoDB
     const client = new MongoClient(`${process.env.DB}`, {
       useNewUrlParser: true,
-      useUnifiedTopology: true,
+      useUnifiedTopology: true
     })
     try {
       await client.connect()
@@ -809,19 +827,19 @@ export async function Bootstrap(): Promise<void> {
     }
     // return new Promise((resolve, reject) => {
     try {
-      console.group("Initializing database connection...")
+      logger.info("Initializing database connection...")
       if (client.isConnected()) {
         const db = process.env.DB?.split("/").reverse()[0]?.split("?")[0]
         MongoClientDB = await client?.db(db)
       } else {
-        console.log("Database connection failed.")
+        logger.info("Database connection failed.")
       }
     } catch (error) {
-      console.log("Database connection failed.")
+      logger.info("Database connection failed.")
     }
     //  })
-    if (!!MongoClientDB) {
-      console.group(`MONGODB adapter in use`)
+    if (MongoClientDB) {
+      logger.info(`MONGODB adapter in use`)
       const DBs = await MongoClientDB.listCollections().toArray()
       const dbs: string[] = []
       for (const db of DBs) {
@@ -830,30 +848,30 @@ export async function Bootstrap(): Promise<void> {
 
       // Preparing Mongo Collections
       if (!dbs.includes("activity_spec")) {
-        console.log("Initializing ActivitySpec database...")
+        logger.info("Initializing ActivitySpec database...")
         await MongoClientDB.createCollection("activity_spec")
         const database = await MongoClientDB.collection("activity_spec")
         await database.createIndex({ timestamp: 1 })
       }
-      console.log("ActivitySpec database online.")
+      logger.info("ActivitySpec database online.")
       if (!dbs.includes("sensor_spec")) {
-        console.log("Initializing SensorSpec database...")
+        logger.info("Initializing SensorSpec database...")
         await MongoClientDB.createCollection("sensor_spec")
         const database = await MongoClientDB.collection("sensor_spec")
         await database.createIndex({ timestamp: 1 })
       }
-      console.log("SensorSpec database online.")
+      logger.info("SensorSpec database online.")
       if (!dbs.includes("researcher")) {
-        console.log("Initializing Researcher database...")
+        logger.info("Initializing Researcher database...")
         await MongoClientDB.createCollection("researcher")
         const database = MongoClientDB.collection("researcher")
         await database.createIndex({ _id: 1, _parent: 1, timestamp: 1 })
         await database.createIndex({ _parent: 1, timestamp: 1 })
         await database.createIndex({ timestamp: 1 })
       }
-      console.log("Researcher database online.")
+      logger.info("Researcher database online.")
       if (!dbs.includes("study")) {
-        console.log("Initializing Study database...")
+        logger.info("Initializing Study database...")
         await MongoClientDB.createCollection("study")
         const database = MongoClientDB.collection("study")
         await database.createIndex({ _id: 1, _parent: 1, timestamp: 1 })
@@ -861,18 +879,18 @@ export async function Bootstrap(): Promise<void> {
         await database.createIndex({ timestamp: 1 })
       }
 
-      console.log("Study database online.")
+      logger.info("Study database online.")
       if (!dbs.includes("participant")) {
-        console.log("Initializing Participant database...")
+        logger.info("Initializing Participant database...")
         await MongoClientDB.createCollection("participant")
         const database = MongoClientDB.collection("participant")
         await database.createIndex({ _id: 1, _parent: 1, timestamp: 1 })
         await database.createIndex({ _parent: 1, timestamp: 1 })
         await database.createIndex({ timestamp: 1 })
       }
-      console.log("Participant database online.")
+      logger.info("Participant database online.")
       if (!dbs.includes("activity")) {
-        console.log("Initializing Activity database...")
+        logger.info("Initializing Activity database...")
         await MongoClientDB.createCollection("activity")
         const database = await MongoClientDB.collection("activity")
         await database.createIndex({ _id: 1, _parent: 1, timestamp: 1 })
@@ -880,41 +898,41 @@ export async function Bootstrap(): Promise<void> {
         await database.createIndex({ timestamp: 1 })
         await database.createIndex({ _id: 1, timestamp: 1 })
       }
-      console.log("Activity database online.")
+      logger.info("Activity database online.")
       if (!dbs.includes("sensor")) {
-        console.log("Initializing Sensor database...")
+        logger.info("Initializing Sensor database...")
         await MongoClientDB.createCollection("sensor")
         const database = MongoClientDB.collection("sensor")
         await database.createIndex({ _id: 1, _parent: 1, timestamp: 1 })
         await database.createIndex({ _parent: 1, timestamp: 1 })
         await database.createIndex({ timestamp: 1 })
       }
-      console.log("Sensor database online.")
+      logger.info("Sensor database online.")
       if (!dbs.includes("activity_event")) {
-        console.log("Initializing ActivityEvent database...")
+        logger.info("Initializing ActivityEvent database...")
         await MongoClientDB.createCollection("activity_event")
         const database = MongoClientDB.collection("activity_event")
         await database.createIndex({ _parent: -1, activity: -1, timestamp: -1 })
         await database.createIndex({ _parent: -1, timestamp: -1 })
       }
-      console.log("ActivityEvent database online.")
+      logger.info("ActivityEvent database online.")
       if (!dbs.includes("sensor_event")) {
-        console.log("Initializing SensorEvent database...")
+        logger.info("Initializing SensorEvent database...")
         await MongoClientDB.createCollection("sensor_event")
         const database = MongoClientDB.collection("sensor_event")
         await database.createIndex({ _parent: -1, sensor: -1, timestamp: -1 })
         await database.createIndex({ _parent: -1, timestamp: -1 })
       }
-      console.log("SensorEvent database online.")
+      logger.info("SensorEvent database online.")
       if (!dbs.includes("tag")) {
-        console.log("Initializing Tag database...")
+        logger.info("Initializing Tag database...")
         await MongoClientDB.createCollection("tag")
         const database = MongoClientDB.collection("tag")
         await database.createIndex({ _parent: 1, type: 1, key: 1 })
       }
-      console.log("Tag database online.")
+      logger.info("Tag database online.")
       if (!dbs.includes("credential")) {
-        console.log("Initializing Credential database...")
+        logger.info("Initializing Credential database...")
         await MongoClientDB.createCollection("credential")
         const database = MongoClientDB.collection("credential")
         await database.createIndex({ access_key: 1 })
@@ -932,20 +950,16 @@ export async function Bootstrap(): Promise<void> {
             access_key: "admin",
             secret_key: Encrypt(p, "AES256"),
             description: "System Administrator Credential",
-            _deleted: false,
+            _deleted: false
           } as any)
         } catch (error) {
-          console.log(error)
+          logger.info(error)
         }
       }
-      console.log("Credential database online.")
-
-      console.groupEnd()
-      console.groupEnd()
-      console.log("Database verification complete.")
+      logger.info("Credential database online.")
+      logger.info("Database verification complete.")
     } else {
-      console.groupEnd()
-      console.log("Database verification failed.")
+      logger.info("Database verification failed.")
     }
   }
 }
@@ -954,20 +968,20 @@ export async function Bootstrap(): Promise<void> {
 /**
  * nats connect
  */
- async function NatsConnect() {
-  let intervalId = setInterval(async () => {
+async function NatsConnect() {
+  const intervalId = setInterval(async () => {
     try {
       nc = await connect({
         servers: [`${process.env.NATS_SERVER}`],
         payload: Payload.JSON,
         maxReconnectAttempts: -1,
         reconnect: true,
-        reconnectTimeWait: 2000,
+        reconnectTimeWait: 2000
       })
       clearInterval(intervalId)
-      console.log("Connected to nats pub server")    
+      logger.info("Connected to nats pub server")
     } catch (error) {
-      console.log("Error in Connecting to nats pub server")
+      logger.info("Error in Connecting to nats pub server")
     }
   }, 3000)
 }
@@ -980,22 +994,27 @@ export class Repository {
   public getResearcherRepository(): ResearcherInterface {
     return DB_DRIVER === "couchdb" ? new ResearcherRepository() : new ResearcherRepositoryMongo()
   }
+
   //GET Study Repository
   public getStudyRepository(): StudyInterface {
     return DB_DRIVER === "couchdb" ? new StudyRepository() : new StudyRepositoryMongo()
   }
+
   //GET Participant Repository
   public getParticipantRepository(): ParticipantInterface {
     return DB_DRIVER === "couchdb" ? new ParticipantRepository() : new ParticipantRepositoryMongo()
   }
+
   //GET Activity Repository
   public getActivityRepository(): ActivityInterface {
     return DB_DRIVER === "couchdb" ? new ActivityRepository() : new ActivityRepositoryMongo()
   }
+
   //GET Activity Repository
   public getSensorRepository(): SensorInterface {
     return DB_DRIVER === "couchdb" ? new SensorRepository() : new SensorRepositoryMongo()
   }
+
   //GET ActivityEvent Repository
   public getActivityEventRepository(): ActivityEventInterface {
     return DB_DRIVER === "couchdb" ? new ActivityEventRepository() : new ActivityEventRepositoryMongo()
@@ -1005,6 +1024,7 @@ export class Repository {
   public getSensorEventRepository(): SensorEventInterface {
     return DB_DRIVER === "couchdb" ? new SensorEventRepository() : new SensorEventRepositoryMongo()
   }
+
   //GET ActivitySpec Repository
   public getActivitySpecRepository(): ActivitySpecInterface {
     return DB_DRIVER === "couchdb" ? new ActivitySpecRepository() : new ActivitySpecRepositoryMongo()
@@ -1028,25 +1048,26 @@ export class Repository {
 
 /**
  * Creating singleton class for redis
-*/
+ */
 export class RedisFactory {
   private static instance: ioredis.Redis
-  private constructor() {}
+
   
+
   /**
    * @returns redis client instance
-  */
+   */
   public static getInstance(): ioredis.Redis {
     if (this.instance === undefined) {
       this.instance = new ioredis(
-                parseInt(`${(process.env.REDIS_HOST as any).match(/([0-9]+)/g)?.[0]}`),
-                (process.env.REDIS_HOST as any).match(/\/\/([0-9a-zA-Z._]+)/g)?.[0],
-      {
-        reconnectOnError() {
-          return 1
-        },
-        enableReadyCheck: true,
-      })
+        parseInt(`${(process.env.REDIS_HOST as any).match(/([0-9]+)/g)?.[0]}`),
+        (process.env.REDIS_HOST as any).match(/\/\/([0-9a-zA-Z._]+)/g)?.[0],
+        {
+          reconnectOnError() {
+            return 1
+          },
+          enableReadyCheck: true
+        })
     }
     return this.instance
   }
